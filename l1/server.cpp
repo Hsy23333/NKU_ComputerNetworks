@@ -51,19 +51,23 @@ void Handleclient(SOCKET clientsocket){//分配线程处理每个客户端
             string msg(buffer);
 
 
+            int wideLen = MultiByteToWideChar(CP_UTF8, 0, msg.c_str(), -1, NULL, 0);
+            wstring wmsg(wideLen, 0);
+            MultiByteToWideChar(CP_UTF8, 0, msg.c_str(), -1, &wmsg[0], wideLen);//防止接收消息乱码
+
             auto now = chrono::system_clock::now();
             time_t t = chrono::system_clock::to_time_t(now);
             stringstream timeStream;
             timeStream << "[" << put_time(localtime(&t), "%Y-%m-%d %H:%M:%S") << "] ";
             //同样是时间戳
 
-            wcout << L"收到消息: " << msg.c_str() << endl;
+            wcout << L"收到消息: " << wmsg << endl;
             Boardcastmessage(msg);
         } else if(ret == 0){
             wcout << L"客户端断开连接" << endl;
             break;
-        } else {
-            wcout << L"接收消息失败" << endl;
+        } else {//错误处理（本来有区别，但不知为啥断开之后永远不走上面那条，遂改）
+            wcout << L"客户端断开连接" << endl;
             break;
         }
     }
