@@ -29,6 +29,7 @@ FILE* fopen_utf8(const char* filename, const char* mode) {
 void close_connection(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
                       uint32_t* seq, uint32_t server_seq) {
     RDT_Packet pkt, recv_pkt;
+    printf("正在关闭连接\n");
 
     // ---- FIN ----
     pkt.seq_num = *seq;
@@ -88,7 +89,6 @@ void close_connection(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servL
     }
 }
 
-// ================== 发送文件 ==================
 void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
                uint32_t* seq, uint32_t server_seq,
                const char* filename) {
@@ -107,6 +107,13 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
     ph.zero = 0;
     ph.protocol = 17;
 
+    PseudoHeader ph_recv;
+    ph_recv.src_ip = servaddr->sin_addr.s_addr;
+    ph_recv.dst_ip = CLIENT_IP;
+    ph_recv.zero = 0;
+    ph_recv.protocol = 17;
+
+    printf("开始发送文件：%s\n", filename);
     // ---------- 发送文件名 ----------
     pkt.seq_num = *seq;
     pkt.ack_num = server_seq;
@@ -123,12 +130,57 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
 
     // 等 ACK
     while (1) {
+        printf("等待文件名ACK\n");
+        recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
+                 (struct sockaddr*)servaddr, &servLen);
+        
+        uint16_t ck = recv_pkt.checksum;
+        recv_pkt.checksum = 0;
+        ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + recv_pkt.length);
+        if (ck != checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length)){
+            printf("文件名ACK校验失败\n");
+            continue;
+        }
+            
+
+        if ((recv_pkt.flags & FLAG_ACK) &&
+            recv_pkt.ack_num == *seq + pkt.length)
+            break;
+    }
+
+    *seq += pkt.length;
+
+    // ---------- 发送文件大小 ----------
+    fseek(fp, 0, SEEK_END);
+    long fileSize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    char sizeStr[32];
+    snprintf(sizeStr, sizeof(sizeStr), "%ld", fileSize);
+
+    pkt.seq_num = *seq;
+    pkt.ack_num = server_seq;
+    pkt.flags = 0;
+    pkt.length = (uint16_t)strlen(sizeStr);
+    memcpy(pkt.truedata, sizeStr, pkt.length);
+
+    ph.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length);
+
+    pkt.checksum = 0;
+    pkt.checksum = checksum_with_pseudo(&ph, &pkt, pkt.length);
+    printf("发送文件大小：%s 字节\n", sizeStr);
+    sendto(sock, (char*)&pkt, sizeof(pkt), 0,
+           (struct sockaddr*)servaddr, servLen);
+
+    // 等 ACK
+    while (1) {
         recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
                  (struct sockaddr*)servaddr, &servLen);
 
         uint16_t ck = recv_pkt.checksum;
         recv_pkt.checksum = 0;
-        if (ck != checksum_with_pseudo(&ph, &recv_pkt, recv_pkt.length))
+        ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + recv_pkt.length);
+        if (ck != checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length))
             continue;
 
         if ((recv_pkt.flags & FLAG_ACK) &&
@@ -138,7 +190,7 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
 
     *seq += pkt.length;
 
-    // ---------- 发送文件内容 ----------
+    // ---------- 发送文件数据 ----------
     char buf[512];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
@@ -166,7 +218,8 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
 
                 uint16_t ck = recv_pkt.checksum;
                 recv_pkt.checksum = 0;
-                if (ck != checksum_with_pseudo(&ph, &recv_pkt, recv_pkt.length))
+                ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + recv_pkt.length);
+                if (ck != checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length))
                     continue;
 
                 if ((recv_pkt.flags & FLAG_ACK) &&
@@ -180,8 +233,10 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
     }
 
     fclose(fp);
-    printf("文件发送完成：%s\n", filename);
+    printf("文件 %s 传输成功\n", filename);
 }
+
+
 
 // ================== main ==================
 int main() {
@@ -254,6 +309,12 @@ int main() {
     pkt.checksum = checksum_with_pseudo(&ph, &pkt, pkt.length);
     sendto(sock, (char*)&pkt, sizeof(pkt), 0,
            (struct sockaddr*)&servaddr, servLen);
+    printf("连接成功\n");
+
+
+
+
+
 
 
     // ---------- 文件交互 ----------
@@ -263,6 +324,7 @@ int main() {
         fgets(filename, sizeof(filename), stdin);
         filename[strcspn(filename, "\r\n")] = 0;
         if (strcmp(filename, "end") == 0) break;
+        printf("尝试传输文件...\n");
         send_file(sock, &servaddr, servLen, &client_seq, server_seq, filename);
     }
 

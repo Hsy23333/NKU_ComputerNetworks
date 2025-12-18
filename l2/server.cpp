@@ -1,4 +1,3 @@
-// server.c
 #include "server.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -49,8 +48,10 @@ void server_run(int port) {
     uint32_t server_seq = rand() % 10000;
 
     while (1) {
+        printf("等待连接\n");
         recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
                  (struct sockaddr*)&cliaddr, &cliLen);
+        printf("收到请求\n");
 
         // ---------- 校验 client -> server ----------
         PseudoHeader ph_recv;
@@ -96,7 +97,7 @@ void server_run(int port) {
                     continue;
 
                 if ((pkt.flags & FLAG_ACK) && pkt.ack_num == server_seq + 1) {
-                    printf("Connection established!\n");
+                    printf("成功连接\n");
                     connection_loop(sock, &cliaddr, &cliLen, server_seq + 1);
                     return;
                 }
@@ -109,14 +110,22 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
     RDT_Packet pkt, send_pkt;
     FILE* fp = NULL;
     uint32_t expected_seq = 0;
-    uint16_t last_length = 0;
+    int fileSize = 0;
+    int total_received = 0;
+    char filename[512] = {0};
+    int stage = 0; // 0: 等文件名, 1: 等文件大小, 2: 数据传输
 
     _mkdir("./serverrecv");
 
     while (1) {
-        recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
-                 (struct sockaddr*)cliaddr, cliLen);
+        //printf("**循环接收包\n");
+        memset(&pkt, 0, sizeof(pkt));
+        int recv_len = recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
+                                (struct sockaddr*)cliaddr, cliLen);
+        //printf("**收到包\n");
+        if (recv_len <= 0) continue;
 
+        // 校验伪头 + checksum
         PseudoHeader ph_recv;
         ph_recv.src_ip = cliaddr->sin_addr.s_addr;
         ph_recv.dst_ip = SERVER_IP;
@@ -126,8 +135,7 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
 
         uint16_t ck = pkt.checksum;
         pkt.checksum = 0;
-        if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length))
-            continue;
+        if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length)) continue;
 
         // ---------- FIN ----------
         if (pkt.flags & FLAG_FIN) {
@@ -156,19 +164,15 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
             return;
         }
 
-        // ---------- DATA ----------
-        if (pkt.length > 0) {
-            if (!fp) {
-                char path[512];
-                snprintf(path, sizeof(path), "./serverrecv/%s", pkt.truedata);
-                fp = fopen_utf8(path, "wb");
-                expected_seq = pkt.seq_num + pkt.length;
-            } else if (pkt.seq_num == expected_seq) {
-                fwrite(pkt.truedata, 1, pkt.length, fp);
-                expected_seq += pkt.length;
-                last_length = pkt.length;
-            }
+        // ---------- 文件名 ----------
+        if (stage == 0) {
+            memcpy(filename, pkt.truedata, pkt.length);
+            filename[pkt.length] = 0; // 确保字符串结束
+            printf("尝试接收文件: %s\n", filename);
+            stage = 1;
+            expected_seq = pkt.seq_num + pkt.length;
 
+            // 发送 ACK
             PseudoHeader ph_send;
             ph_send.src_ip = SERVER_IP;
             ph_send.dst_ip = cliaddr->sin_addr.s_addr;
@@ -184,9 +188,26 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
             sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
                    (struct sockaddr*)cliaddr, *cliLen);
         }
+        // ---------- 文件大小 ----------
+        else if (stage == 1) {//printf("debug\n");
+            char sizeStr[32] = {0};
+            memcpy(sizeStr, pkt.truedata, pkt.length);
+            sizeStr[pkt.length] = 0;
+            fileSize = atoi(sizeStr);
+            printf("文件大小: %d bytes\n", fileSize);
 
-        // ---------- 处理重复数据包 ----------
-        if (pkt.length > 0 && pkt.seq_num + pkt.length == expected_seq) {
+            char path[512];
+            snprintf(path, sizeof(path), "./serverrecv/%s", filename);
+            fp = fopen_utf8(path, "wb");
+            if (!fp) {
+                printf("Failed to open file %s\n", path);
+                return;
+            }
+            stage = 2;
+            expected_seq = pkt.seq_num + pkt.length;
+            total_received = 0;
+
+            // 发送 ACK
             PseudoHeader ph_send;
             ph_send.src_ip = SERVER_IP;
             ph_send.dst_ip = cliaddr->sin_addr.s_addr;
@@ -201,9 +222,46 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
             send_pkt.checksum = checksum_with_pseudo(&ph_send, &send_pkt, send_pkt.length);
             sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
                    (struct sockaddr*)cliaddr, *cliLen);
+        }
+        // ---------- 文件数据 ----------
+        else if (stage == 2 && pkt.length > 0) {
+            if (pkt.seq_num == expected_seq) {
+                fwrite(pkt.truedata, 1, pkt.length, fp);
+                total_received += pkt.length;
+                expected_seq += pkt.length;
+            } else {
+                printf("Out-of-order or duplicate packet, seq = %u, expected = %u\n",
+                       pkt.seq_num, expected_seq);
+            }
+
+            // 回复 ACK
+            PseudoHeader ph_send;
+            ph_send.src_ip = SERVER_IP;
+            ph_send.dst_ip = cliaddr->sin_addr.s_addr;
+            ph_send.zero = 0;
+            ph_send.protocol = 17;
+            ph_send.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE);
+
+            send_pkt.seq_num = server_seq;
+            send_pkt.ack_num = expected_seq;
+            send_pkt.flags = FLAG_ACK;
+            send_pkt.length = 0;
+            send_pkt.checksum = checksum_with_pseudo(&ph_send, &send_pkt, send_pkt.length);
+            sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
+                   (struct sockaddr*)cliaddr, *cliLen);
+
+            // 检查是否接收完成
+            if (total_received == fileSize) {
+                printf("文件 %s 传输成功\n", filename);
+                fclose(fp);
+                fp = NULL;
+                stage = 0;
+            }
         }
     }
 }
+
+
 
 int main() {
     server_run(114);
