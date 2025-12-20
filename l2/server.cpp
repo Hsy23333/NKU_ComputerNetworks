@@ -123,6 +123,9 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
         int recv_len = recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
                                 (struct sockaddr*)cliaddr, cliLen);
         //printf("**收到包\n");
+        //printf("[SERVER] recv_len = %d\n", recv_len);
+        //printf("[SERVER] checksum offset = %zu\n",
+        //    offsetof(RDT_Packet, checksum));
         if (recv_len <= 0) continue;
 
         // 校验伪头 + checksum
@@ -133,12 +136,18 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
         ph_recv.protocol = 17;
         ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length);
 
+        //printf("pkt.length=%d\n",pkt.length);
         uint16_t ck = pkt.checksum;
         pkt.checksum = 0;
-        if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length)) continue;
+        if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length)){
+            printf("校验和错误(%d)，应为(%d)，跳过该包\n",checksum_with_pseudo(&ph_recv, &pkt, pkt.length),ck);
+            continue;
+        }
 
         // ---------- FIN ----------
         if (pkt.flags & FLAG_FIN) {
+            printf("收到 FIN，准备回传挥手ACK\n");
+            Sleep(500);
             PseudoHeader ph_send;
             ph_send.src_ip = SERVER_IP;
             ph_send.dst_ip = cliaddr->sin_addr.s_addr;
@@ -154,13 +163,43 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
             sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
                    (struct sockaddr*)cliaddr, *cliLen);
 
+            printf("回传后，等待发送第三次挥手\n");
+            Sleep(500);
+
             send_pkt.flags = FLAG_FIN;
             send_pkt.checksum = checksum_with_pseudo(&ph_send, &send_pkt, send_pkt.length);
             sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
                    (struct sockaddr*)cliaddr, *cliLen);
 
             if (fp) fclose(fp);
-            printf("Connection closed\n");
+            printf("发送了第三次，等待客户端回应第四次ACK\n");
+            Sleep(500);
+            while(1){
+                memset(&pkt, 0, sizeof(pkt));
+                recv_len=recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
+                                (struct sockaddr*)cliaddr, cliLen);
+                if (recv_len <= 0) continue;
+
+                // 校验伪头 + checksum
+                PseudoHeader ph_recv;
+                ph_recv.src_ip = cliaddr->sin_addr.s_addr;
+                ph_recv.dst_ip = SERVER_IP;
+                ph_recv.zero = 0;
+                ph_recv.protocol = 17;
+                ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length);
+
+                //printf("pkt.length=%d\n",pkt.length);
+                uint16_t ck = pkt.checksum;
+                pkt.checksum = 0;
+                if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length)){
+                    printf("校验和错误(%d)，应为(%d)，跳过该包\n",checksum_with_pseudo(&ph_recv, &pkt, pkt.length),ck);
+                    continue;
+                }
+                printf("收到ACK，准备关闭\n");
+                break;
+            }
+            printf("连接成功关闭,5000ms后回退\n");
+            Sleep(5000);
             return;
         }
 

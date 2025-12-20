@@ -34,32 +34,51 @@ void close_connection(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servL
     // ---- FIN ----
     pkt.seq_num = *seq;
     pkt.ack_num = server_seq;
-    pkt.flags = FLAG_FIN;
-    pkt.length = 0;
+    pkt.flags   = FLAG_FIN;
+    pkt.length  = 0;
 
+    //计算校验和使用的长度（照文件发送逻辑）
+    int pkt_len = sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length;
+
+    //构造伪头部（与文件发送保持一致）
     PseudoHeader ph;
-    ph.src_ip = CLIENT_IP;
-    ph.dst_ip = servaddr->sin_addr.s_addr;
-    ph.zero = 0;
-    ph.protocol = 17;
-    ph.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE);
+    ph.src_ip   = CLIENT_IP;
+    ph.dst_ip   = servaddr->sin_addr.s_addr;
+    ph.zero     = 0;
+    ph.protocol = 17; // UDP
+    ph.length   = htons(pkt_len);
 
-    memset(pkt.truedata + pkt.length, 0, MAX_DATA_SIZE - pkt.length);
+    //清空数据区（防止未初始化导致 checksum 不一致）
+    memset(pkt.truedata, 0, MAX_DATA_SIZE);
+
+    // 计算 checksum（与文件发送一致）
     pkt.checksum = 0;
-    pkt.checksum = checksum_with_pseudo(&ph, &pkt, sizeof(pkt));
-    sendto(sock, (char*)&pkt, sizeof(pkt), 0,
-           (struct sockaddr*)servaddr, servLen);
+    pkt.checksum = checksum_with_pseudo(&ph, &pkt, pkt.length);
+    //printf("pkt.length = %d\n", pkt_len);
+
+    printf("发送FIN，校验和(%d)\n", pkt.checksum);
+
+    sendto(sock, (char*)&pkt, pkt_len, 0,
+        (struct sockaddr*)servaddr, servLen);
+
+
 
     // ---- 等 ACK ----
     while (1) {//std::cout<<"111";
+        printf("等待ACK\n");
         recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
                  (struct sockaddr*)servaddr, &servLen);
+        Sleep(500);
+        printf("收到包，继续发送\n");
 
         memset(recv_pkt.truedata + recv_pkt.length, 0, MAX_DATA_SIZE - recv_pkt.length);
         uint16_t ck = recv_pkt.checksum;
         recv_pkt.checksum = 0;
-        if (ck != checksum_with_pseudo(&ph, &recv_pkt, sizeof(recv_pkt)))
+        if (ck != checksum_with_pseudo(&ph, &recv_pkt, recv_pkt.length)){
+            printf("校验和错误(%d)，应为(%d)，跳过该包\n",checksum_with_pseudo(&ph, &recv_pkt, recv_pkt.length),ck);
             continue;
+        }
+            
 
         if ((recv_pkt.flags & FLAG_ACK) &&
             recv_pkt.ack_num == *seq + 1)
@@ -68,13 +87,17 @@ void close_connection(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servL
 
     // ---- 等 server FIN ----
     while (1) {//std::cout<<"222";
+        printf("等待server FIN\n");
         recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
                  (struct sockaddr*)servaddr, &servLen);
+        Sleep(500);
+        
 
         uint16_t ck = recv_pkt.checksum;
         recv_pkt.checksum = 0;
         if (ck != checksum_with_pseudo(&ph, &recv_pkt, recv_pkt.length))
             continue;
+        printf("收到包，继续发送最后一次挥手\n");
 
         if (recv_pkt.flags & FLAG_FIN) {
             pkt.seq_num = *seq + 1;
@@ -87,6 +110,8 @@ void close_connection(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servL
             break;
         }
     }
+    printf("连接已关闭,5000ms后回退\n");
+    Sleep(5000);
 }
 
 void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
