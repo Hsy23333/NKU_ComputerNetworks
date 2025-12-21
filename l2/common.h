@@ -8,6 +8,14 @@
 #define MAX_DATA_SIZE 1024
 #define WINDOW_SIZE 5
 
+#define CLIENT_IP inet_addr("127.0.0.1")
+#define SERVER_IP inet_addr("127.0.0.1")
+
+
+
+
+
+
 // 控制位
 #define FLAG_SYN 1
 #define FLAG_ACK 2
@@ -35,6 +43,45 @@ typedef struct {
     uint8_t protocol;    // 协议号
     uint16_t length;     // 包长度（首部+数据）
 } PseudoHeader;
+
+
+// -------------------------------
+// 发送 滑动窗口相关槽位
+// -------------------------------
+struct SendSlot {
+    RDT_Packet pkt;      // 原始包
+    uint64_t send_time;  // 最近一次发送时间
+    int acked=-1;            // 是否被确认
+};
+// -------------------------------
+// 发送 滑动窗口结构体
+// -------------------------------
+typedef struct {
+    SendSlot slots[WINDOW_SIZE]; // 窗口格子
+    int base;                    // 窗口头对应的 seq
+    int next_seq;                // 下一个可发送 seq
+    int count;                   // 当前窗口内包的数量
+} SendWindow;//滑动窗口结构体
+
+
+
+// -------------------------------
+// 接收 滑动窗口相关槽位
+// -------------------------------
+typedef struct {
+    RDT_Packet pkt;
+    int received;  // 是否收到
+} RecvSlot;
+// -------------------------------
+// 接收 滑动窗口结构体
+// -------------------------------
+typedef struct {
+    RecvSlot slots[WINDOW_SIZE]; // 窗口格子
+    uint32_t base_seq;                // 窗口头对应的 seq
+    int count;                        // 当前窗口中有效包数量
+} RecvWindow;
+
+
 
 // -------------------------------
 // 校验和函数

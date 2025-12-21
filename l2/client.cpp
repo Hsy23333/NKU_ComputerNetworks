@@ -10,6 +10,123 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+
+
+
+
+void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,SOCKET sock,sockaddr_in *servaddr,socklen_t servLen){//滑动窗口发送端
+    
+    u_long mode=1;
+    ioctlsocket(sock, FIONBIO, &mode);//设置非阻塞模式，记得文件结束后改回来
+    
+    SendWindow win;
+    memset(&win, 0, sizeof(win));
+    win.base = *seq;  // 初始 seq
+    win.next_seq = *seq;
+    win.count = 0;
+//初始化窗口
+
+    char buf[512];
+    size_t n;
+    while((n = fread(buf, 1, sizeof(buf), fp))>0){//只要没发完就一直这么做
+
+        if (win.count < WINDOW_SIZE) {
+            SendSlot *slot = &win.slots[win.count];
+            slot->pkt.seq_num = win.next_seq;
+            slot->pkt.length = (uint16_t)n;
+            memcpy(slot->pkt.truedata, buf, n);
+            ph.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + slot->pkt.length);
+            slot->pkt.checksum = 0;
+            slot->pkt.checksum = checksum_with_pseudo(&ph, &slot->pkt, slot->pkt.length);
+            //printf("length=%d",slot->pkt.length);
+            slot->send_time = GetTickCount();
+            slot->acked = -1;
+
+            win.next_seq += n;
+            win.count++;
+        }
+
+
+        //这一部分是滑动窗口固定时的逻辑
+        RDT_Packet pkt;//暂存的server返回包
+        while(1){
+            if(!win.count)  break;//没有数据包
+
+            //先传包
+            for (int i = 0; i < win.count; i++) {
+                SendSlot *slot = &win.slots[i];
+                if (!slot->acked || slot->acked == -1) {//没被确认
+//printf("???\n");
+                    if (GetTickCount() - slot->send_time > 500 || slot->acked == -1) {//超时重传，或第一次传输
+                        if(slot->acked==0){
+                            printf("重传包，seq = %d\n", slot->pkt.seq_num);
+                        }
+                        else{
+                            printf("第一次传输包，seq = %d\n", slot->pkt.seq_num);
+                        }
+                        slot->acked=0;//标记为传输过但未被确认
+
+                        sendto(sock, (char*)&slot->pkt, sizeof(slot->pkt), 0,
+                            (struct sockaddr*)servaddr, servLen);
+                        slot->send_time = GetTickCount();
+                    }
+                }
+            }
+
+            //然后看看有没有server返回包
+            memset(&pkt, 0, sizeof(pkt));
+            int recvl=recvfrom(sock,(char*)&pkt,sizeof(pkt),0,(struct sockaddr*)servaddr,&servLen);
+            //非阻塞地接收server返回包
+            PseudoHeader ph_recv;
+            ph_recv.src_ip = servaddr->sin_addr.s_addr;
+            ph_recv.dst_ip = CLIENT_IP;
+            ph_recv.zero = 0;
+            ph_recv.protocol = 17;
+            ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length);
+            int ck=checksum_with_pseudo(&ph_recv,&pkt,pkt.length);
+            if(recvl==SOCKET_ERROR || ck!=pkt.checksum){//没收到包或包损坏，休息一小会继续检测即可
+                if (recvl != SOCKET_ERROR) {
+                    printf("length=%d ", pkt.length);
+                    printf("校验和错误(计算得%d，应为%d)，跳过该包\n", ck, pkt.checksum);//Sleep(1000000);
+                }
+                //Sleep(100);
+                continue;
+            }
+            else{//接收到返回包，更新slot确认情况
+                for(int i=0;i<win.count;++i){
+                    SendSlot *slot=&win.slots[i];
+                    if(slot->pkt.seq_num==pkt.ack_num){
+                        slot->acked=1;
+                        printf("收到确认，seq = %d\n",slot->pkt.seq_num);
+                        break;
+                    }
+
+                }
+            }
+            if(win.slots[0].acked==1){
+                //如果窗口头被确认，滑动窗口
+                win.base+=win.slots[0].pkt.length;
+                for(int i=0;i<win.count-1;i++){
+                    win.slots[i]=win.slots[i+1];
+                }
+                --win.count;
+                
+                break;//出去继续读取下一包准备发送
+            }
+        }
+
+    }
+
+
+
+    mode=0;
+    ioctlsocket(sock, FIONBIO, &mode);//改回阻塞模式便于挥手
+
+}
+
+
+
+
 FILE* fopen_utf8(const char* filename, const char* mode) {
     int len = MultiByteToWideChar(CP_UTF8, 0, filename, -1, NULL, 0);
     wchar_t* wfilename = new wchar_t[len];
@@ -22,8 +139,6 @@ FILE* fopen_utf8(const char* filename, const char* mode) {
     delete[] wmode;
     return fp;
 }
-
-#define CLIENT_IP inet_addr("127.0.0.1")
 
 // ================== 关闭连接 ==================
 void close_connection(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
@@ -216,6 +331,9 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
     *seq += pkt.length;
 
     // ---------- 发送文件数据 ----------
+    sliding_window_send(WINDOW_SIZE, seq, fp, ph, sock, servaddr, servLen);
+    //下面是原先的阻塞等待方法
+    /*
     char buf[512];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
@@ -255,7 +373,7 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
             }
         }
         *seq += n;
-    }
+    }*/
 
     fclose(fp);
     printf("文件 %s 传输成功\n", filename);
