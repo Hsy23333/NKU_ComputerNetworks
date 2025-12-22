@@ -40,7 +40,7 @@ void sliding_window_recv(FILE *fp, SOCKET sock, sockaddr_in *cliaddr, socklen_t 
         int recvl = recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
                              (struct sockaddr*)cliaddr, cliLen);
         if (recvl==SOCKET_ERROR || recvl <= 0) {
-            printf("未收到包，等待\n");//Sleep(100000);
+            //printf("未收到包，等待\n");//Sleep(100000);
             //Sleep(100);
             continue;
         } // 没收到包
@@ -50,7 +50,7 @@ void sliding_window_recv(FILE *fp, SOCKET sock, sockaddr_in *cliaddr, socklen_t 
 
         PseudoHeader ph_recv;
         ph_recv.src_ip = cliaddr->sin_addr.s_addr;
-        ph_recv.dst_ip = SERVER_IP;
+        ph_recv.dst_ip = inet_addr("192.168.56.1");
         ph_recv.zero = 0;
         ph_recv.protocol = 17;
         ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length);
@@ -78,9 +78,9 @@ void sliding_window_recv(FILE *fp, SOCKET sock, sockaddr_in *cliaddr, socklen_t 
             slot->pkt = pkt;
             slot->received = 1;
             win.count++;
-            printf("[SERVER] 收到包 seq=%u\n", pkt.seq_num);
+            //printf("[SERVER] 收到包 seq=%u\n", pkt.seq_num);
         } else {
-            printf("[SERVER] 重复包 seq=%u\n", pkt.seq_num);
+            //printf("[SERVER] 重复包 seq=%u\n", pkt.seq_num);
         }
 
         // 发送选择确认 ACK
@@ -159,15 +159,18 @@ void server_run(int port) {
         // ---------- 校验 client -> server ----------
         PseudoHeader ph_recv;
         ph_recv.src_ip = cliaddr.sin_addr.s_addr;
-        ph_recv.dst_ip = SERVER_IP;
+        ph_recv.dst_ip = inet_addr("192.168.56.1");
         ph_recv.zero = 0;
         ph_recv.protocol = 17;
         ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length);
 
         uint16_t ck = pkt.checksum;
         pkt.checksum = 0;
-        if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length))
+        if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length)){
+            printf("校验和错误(%d)，应为(%d)，跳过该包\n",checksum_with_pseudo(&ph_recv, &pkt, pkt.length),ck);
             continue;
+        }
+            
 
         // ---------- SYN ----------
         if (pkt.flags & FLAG_SYN) {
@@ -235,7 +238,7 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
         // 校验伪头 + checksum
         PseudoHeader ph_recv;
         ph_recv.src_ip = cliaddr->sin_addr.s_addr;
-        ph_recv.dst_ip = SERVER_IP;
+        ph_recv.dst_ip = inet_addr("192.168.56.1");
         ph_recv.zero = 0;
         ph_recv.protocol = 17;
         ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length);
@@ -285,21 +288,26 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
                                 (struct sockaddr*)cliaddr, cliLen);
                 if (recv_len <= 0) continue;
 
-                // 校验伪头 + checksum
+
                 PseudoHeader ph_recv;
-                ph_recv.src_ip = cliaddr->sin_addr.s_addr;
-                ph_recv.dst_ip = SERVER_IP;
+                ph_recv.src_ip = CLIENT_IP;  // client 真正 IP
+                ph_recv.dst_ip = SERVER_IP;                 // server 自己 IP
                 ph_recv.zero = 0;
                 ph_recv.protocol = 17;
+                // 注意：checksum 长度 = sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length
                 ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length);
 
-                //printf("pkt.length=%d\n",pkt.length);
+                // 不要 memset pkt.truedata，保持接收到的原样
                 uint16_t ck = pkt.checksum;
                 pkt.checksum = 0;
+                //printf("len=%d???/n", (sizeof(RDT_Packet) - MAX_DATA_SIZE + pkt.length));
                 if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length)){
-                    printf("校验和错误(%d)，应为(%d)，跳过该包\n",checksum_with_pseudo(&ph_recv, &pkt, pkt.length),ck);
+                    printf("校验和错误(%d)，应为(%d)，跳过该包\n",
+                        checksum_with_pseudo(&ph_recv, &pkt, pkt.length), ck);
+                    //printf("包信息: seq_num=%u, ack_num=%u, flags=%u, length=%u, checksum=%u\n", pkt.seq_num, pkt.ack_num, pkt.flags, pkt.length, pkt.checksum);
                     continue;
                 }
+
                 printf("收到ACK，准备关闭\n");
                 break;
             }
@@ -376,41 +384,6 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
         // ---------- 文件数据 ----------
         else if (stage == 2 && pkt.length > 0) {
         printf("ERROR:不应该出现在这里\n");
-//下面是原有的阻塞模式，已注释掉
-/*
-            if (pkt.seq_num == expected_seq) {
-                fwrite(pkt.truedata, 1, pkt.length, fp);
-                total_received += pkt.length;
-                expected_seq += pkt.length;
-            } else {
-                printf("Out-of-order or duplicate packet, seq = %u, expected = %u\n",
-                       pkt.seq_num, expected_seq);
-            }
-
-            // 回复 ACK
-            PseudoHeader ph_send;
-            ph_send.src_ip = SERVER_IP;
-            ph_send.dst_ip = cliaddr->sin_addr.s_addr;
-            ph_send.zero = 0;
-            ph_send.protocol = 17;
-            ph_send.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE);
-
-            send_pkt.seq_num = server_seq;
-            send_pkt.ack_num = expected_seq;
-            send_pkt.flags = FLAG_ACK;
-            send_pkt.length = 0;
-            send_pkt.checksum = checksum_with_pseudo(&ph_send, &send_pkt, send_pkt.length);
-            sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
-                   (struct sockaddr*)cliaddr, *cliLen);
-
-            // 检查是否接收完成
-            if (total_received == fileSize) {
-                printf("文件 %s 传输成功\n", filename);
-                fclose(fp);
-                fp = NULL;
-                stage = 0;
-            }
-*/
 
 
         }
@@ -420,6 +393,6 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
 
 
 int main() {
-    server_run(114);
+    server_run(115);
     return 0;
 }
