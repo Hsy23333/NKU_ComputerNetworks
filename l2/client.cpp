@@ -16,8 +16,6 @@
 
 void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,SOCKET sock,sockaddr_in *servaddr,socklen_t servLen){//滑动窗口发送端
     
-    u_long mode=1;
-    ioctlsocket(sock, FIONBIO, &mode);//设置非阻塞模式，记得文件结束后改回来
     
     SendWindow win;
     memset(&win, 0, sizeof(win));
@@ -117,10 +115,6 @@ void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,
 
     }
 
-
-
-    mode=0;
-    ioctlsocket(sock, FIONBIO, &mode);//改回阻塞模式便于挥手
 
 }
 
@@ -283,7 +277,7 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
     ph_recv.zero = 0;
     ph_recv.protocol = 17;
 
-    printf("开始发送文件：%s\n", filename);
+    printf("尝试开始发送文件：%s\n", filename);
     // ---------- 发送文件名 ----------
     pkt.seq_num = *seq;
     pkt.ack_num = server_seq;
@@ -301,9 +295,17 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
     // 等 ACK
     while (1) {
         printf("等待文件名ACK\n");
-        recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
+        Sleep(1200);
+        int recl=recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
                  (struct sockaddr*)servaddr, &servLen);
-        
+        if(recl<=0 || recl==SOCKET_ERROR){
+            printf("未收到文件名ACK包，重发文件名\n");
+            sendto(sock, (char*)&pkt, sizeof(pkt), 0,
+                   (struct sockaddr*)servaddr, servLen);
+            continue;
+        }
+
+
         uint16_t ck = recv_pkt.checksum;
         recv_pkt.checksum = 0;
 
@@ -313,7 +315,9 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
         ph_recv.protocol = 17;
         ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + recv_pkt.length);
         if (ck != checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length)){
-            printf("文件名ACK校验失败\n");
+            printf("校验和错误(%d)，应为(%d)，重发文件名\n", checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length), ck);
+            sendto(sock, (char*)&pkt, sizeof(pkt), 0,
+                   (struct sockaddr*)servaddr, servLen);
             continue;
         }
             
@@ -353,14 +357,26 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
 
     // 等 ACK
     while (1) {
-        recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
+        Sleep(1200);
+        int recl=recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
                  (struct sockaddr*)servaddr, &servLen);
+        if(recl<=0 || recl==SOCKET_ERROR){
+            printf("未收到文件大小ACK包，重发文件大小\n");
+            sendto(sock, (char*)&pkt, sizeof(pkt), 0,
+                   (struct sockaddr*)servaddr, servLen);
+            continue;
+        }
 
         uint16_t ck = recv_pkt.checksum;
         recv_pkt.checksum = 0;
         ph_recv.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE + recv_pkt.length);
-        if (ck != checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length))
+        if (ck != checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length)){
+            printf("校验和错误(%d)，应为(%d)，重发文件大小\n", checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length), ck);
+            sendto(sock, (char*)&pkt, sizeof(pkt), 0,
+                   (struct sockaddr*)servaddr, servLen);
             continue;
+        }
+            
 
         if ((recv_pkt.flags & FLAG_ACK) &&
             recv_pkt.ack_num == *seq + pkt.length)
@@ -398,6 +414,10 @@ int main() {
     uint32_t client_seq = rand() % 10000;
     uint32_t server_seq = 0;
 
+
+    u_long mode=1;
+    ioctlsocket(sock, FIONBIO, &mode);//设置非阻塞模式
+
     RDT_Packet pkt, recv_pkt;
     PseudoHeader ph;
 
@@ -419,8 +439,14 @@ int main() {
     // ---------- SYN+ACK ----------
     while (1) {
         printf("等待SYN+ACK\n");
-        recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
+        Sleep(1200);
+        int recl=recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
                 (struct sockaddr*)&servaddr, &servLen);
+        if(recl<=0 || recl==SOCKET_ERROR){
+            printf("未收到SYN+ACK包，重发SYN\n");
+            sendto(sock, (char*)&pkt, sizeof(pkt), 0,(struct sockaddr*)&servaddr, servLen);
+            continue;
+        }
         printf("Received packet, checksum: %d\n", recv_pkt.checksum);
 
         PseudoHeader ph_recv;
@@ -432,8 +458,12 @@ int main() {
 
         uint16_t ck = recv_pkt.checksum;
         recv_pkt.checksum = 0;
-        if (ck != checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length))
+        if (ck != checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length)){
+            printf("校验和错误(%d)应为(%d)，重发SYN\n", checksum_with_pseudo(&ph_recv, &recv_pkt, recv_pkt.length), ck);
+            sendto(sock, (char*)&pkt, sizeof(pkt), 0,(struct sockaddr*)&servaddr, servLen);
             continue;
+        }
+            
 
         if ((recv_pkt.flags & FLAG_SYN) && (recv_pkt.flags & FLAG_ACK)) {
             printf("Received SYN+ACK\n");
@@ -451,6 +481,32 @@ int main() {
     pkt.checksum = checksum_with_pseudo(&ph, &pkt, pkt.length);
     sendto(sock, (char*)&pkt, sizeof(pkt), 0,
            (struct sockaddr*)&servaddr, servLen);
+
+    while(1){//根据是否接到到SYN+ACK包来判断ACK是否丢失
+        Sleep(1200);
+        memset(&recv_pkt, 0, sizeof(recv_pkt));
+        int recl=recvfrom(sock, (char*)&recv_pkt, sizeof(recv_pkt), 0,
+                (struct sockaddr*)&servaddr, &servLen);
+        if(recl<=0 || recl==SOCKET_ERROR){//未收到，连接成功
+            break;
+        }
+        else{
+            printf("收到SYN+ACK包，需要重发ACK\n");
+            pkt.seq_num = client_seq + 1;
+            pkt.ack_num = server_seq + 1;
+            pkt.flags = FLAG_ACK;
+            pkt.length = 0;
+            pkt.checksum = 0;
+            pkt.checksum = checksum_with_pseudo(&ph, &pkt, pkt.length);
+            sendto(sock, (char*)&pkt, sizeof(pkt), 0,
+                (struct sockaddr*)&servaddr, servLen);
+        }
+    }
+    
+
+
+
+
     printf("连接成功\n");
 
 

@@ -27,8 +27,6 @@ FILE* fopen_utf8(const char* filename, const char* mode) {
 void sliding_window_recv(FILE *fp, SOCKET sock, sockaddr_in *cliaddr, socklen_t *cliLen, PseudoHeader ph, char *filename, int *stage, int fileSize, uint32_t base_seq){
     int total_received=0;
     
-    u_long mode=1;
-    ioctlsocket(sock, FIONBIO, &mode);//设置非阻塞模式，记得文件结束后改回来
     
     RecvWindow win;
     memset(&win, 0, sizeof(win));
@@ -120,8 +118,6 @@ void sliding_window_recv(FILE *fp, SOCKET sock, sockaddr_in *cliaddr, socklen_t 
         }
     }
 
-    mode=0;
-    ioctlsocket(sock, FIONBIO, &mode);//改回阻塞模式便于挥手
 }
 
 
@@ -150,10 +146,20 @@ void server_run(int port) {
 
     uint32_t server_seq = rand() % 10000;
 
+
+    u_long mode=1;
+    ioctlsocket(sock, FIONBIO, &mode);//设置非阻塞模式
+
+    printf("等待连接\n");
     while (1) {
-        printf("等待连接\n");
-        recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
+        
+        Sleep(500);
+        int recl=recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
                  (struct sockaddr*)&cliaddr, &cliLen);
+        if(recl<=0 || recl==SOCKET_ERROR){
+            //printf("未收到包，等待\n");
+            continue;
+        }
         printf("收到请求\n");
 
         // ---------- 校验 client -> server ----------
@@ -194,13 +200,40 @@ void server_run(int port) {
 
             // ---------- 等 ACK ----------
             while (1) {
-                recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
-                         (struct sockaddr*)&cliaddr, &cliLen);
+                Sleep(1200);
+                int recl=recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,(struct sockaddr*)&cliaddr, &cliLen);
+                if(recl<=0 || recl==SOCKET_ERROR){
+                    printf("未收到包，重发SYN+ACK\n");
+                    PseudoHeader ph_send;
+                    ph_send.src_ip = SERVER_IP;
+                    ph_send.dst_ip = cliaddr.sin_addr.s_addr;
+                    ph_send.zero = 0;
+                    ph_send.protocol = 17;
+                    ph_send.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE);
+
+                    send_pkt.checksum = checksum_with_pseudo(&ph_send, &send_pkt, send_pkt.length);
+                    sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
+                        (struct sockaddr*)&cliaddr, cliLen);
+                    continue;
+                }
 
                 ck = pkt.checksum;
                 pkt.checksum = 0;
-                if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length))
+                if (ck != checksum_with_pseudo(&ph_recv, &pkt, pkt.length)){
+                    printf("校验和错误(%d)，应为(%d)，重发SYN+ACK\n",checksum_with_pseudo(&ph_recv, &pkt, pkt.length),ck);
+                    PseudoHeader ph_send;
+                    ph_send.src_ip = SERVER_IP;
+                    ph_send.dst_ip = cliaddr.sin_addr.s_addr;
+                    ph_send.zero = 0;
+                    ph_send.protocol = 17;
+                    ph_send.length = htons(sizeof(RDT_Packet) - MAX_DATA_SIZE);
+
+                    send_pkt.checksum = checksum_with_pseudo(&ph_send, &send_pkt, send_pkt.length);
+                    sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
+                        (struct sockaddr*)&cliaddr, cliLen);
                     continue;
+                }
+                    
 
                 if ((pkt.flags & FLAG_ACK) && pkt.ack_num == server_seq + 1) {
                     printf("成功连接\n");
@@ -227,13 +260,18 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
     while (1) {
         //printf("**循环接收包\n");
         memset(&pkt, 0, sizeof(pkt));
+        if(stage==0)    Sleep(500);
+        else Sleep(1200);
+        
         int recv_len = recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
                                 (struct sockaddr*)cliaddr, cliLen);
         //printf("**收到包\n");
         //printf("[SERVER] recv_len = %d\n", recv_len);
         //printf("[SERVER] checksum offset = %zu\n",
         //    offsetof(RDT_Packet, checksum));
-        if (recv_len <= 0) continue;
+        if (recv_len <= 0){
+            continue;
+        }
 
         // 校验伪头 + checksum
         PseudoHeader ph_recv;
