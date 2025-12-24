@@ -153,7 +153,7 @@ void server_run(int port) {
     printf("等待连接\n");
     while (1) {
         
-        Sleep(500);
+        Sleep(50);
         int recl=recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
                  (struct sockaddr*)&cliaddr, &cliLen);
         if(recl<=0 || recl==SOCKET_ERROR){
@@ -260,9 +260,9 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
     while (1) {
         //printf("**循环接收包\n");
         memset(&pkt, 0, sizeof(pkt));
-        if(stage==0)    Sleep(500);
+        if(stage==0)    Sleep(50);
         else Sleep(1200);
-        
+
         int recv_len = recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
                                 (struct sockaddr*)cliaddr, cliLen);
         //printf("**收到包\n");
@@ -293,7 +293,7 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
         // ---------- FIN ----------
         if (pkt.flags & FLAG_FIN) {
             printf("收到 FIN，准备回传挥手ACK\n");
-            Sleep(500);
+            Sleep(50);
             PseudoHeader ph_send;
             ph_send.src_ip = SERVER_IP;
             ph_send.dst_ip = cliaddr->sin_addr.s_addr;
@@ -310,7 +310,7 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
                    (struct sockaddr*)cliaddr, *cliLen);
 
             printf("回传后，等待发送第三次挥手\n");
-            Sleep(500);
+            Sleep(50);
 
             send_pkt.flags = FLAG_FIN;
             send_pkt.checksum = checksum_with_pseudo(&ph_send, &send_pkt, send_pkt.length);
@@ -319,12 +319,18 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
 
             if (fp) fclose(fp);
             printf("发送了第三次，等待客户端回应第四次ACK\n");
-            Sleep(500);
+            Sleep(50);
             while(1){
                 memset(&pkt, 0, sizeof(pkt));
+                Sleep(1200);
                 recv_len=recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
                                 (struct sockaddr*)cliaddr, cliLen);
-                if (recv_len <= 0) continue;
+                if (recv_len <= 0){
+                    printf("未收到包，重发FIN\n");
+                    sendto(sock, (char*)&send_pkt, sizeof(send_pkt), 0,
+                        (struct sockaddr*)cliaddr, *cliLen);
+                    continue;
+                }
 
 
                 PseudoHeader ph_recv;
