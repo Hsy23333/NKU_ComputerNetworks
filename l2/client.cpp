@@ -358,6 +358,8 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
         return;
     }
 
+    DWORD start_time = GetTickCount();//开始计时
+
     RDT_Packet pkt, recv_pkt;
     PseudoHeader ph;
 
@@ -484,7 +486,15 @@ void send_file(SOCKET sock, struct sockaddr_in* servaddr, socklen_t servLen,
     sliding_window_send(WINDOW_SIZE, seq, fp, ph, sock, servaddr, servLen);
 
     fclose(fp);
+
+
+
+    DWORD end_time = GetTickCount();
+    double elapsed_sec = (end_time - start_time) / 1000.0;
+    double throughput = fileSize / elapsed_sec / 1024.0; // KB/s
     printf("文件 %s 传输成功\n", filename);
+    printf("客户端传输总时间: %.2f 秒\n", elapsed_sec);
+    printf("平均吞吐率: %.2f KB/s\n", throughput);
 }
 
 

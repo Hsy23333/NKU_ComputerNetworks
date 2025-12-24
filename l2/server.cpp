@@ -256,6 +256,7 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
     uint32_t client_data_base = 0;
 
     _mkdir("./serverrecv");
+    DWORD start_time;
 
     while (1) {
         //printf("**循环接收包\n");
@@ -364,6 +365,9 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
         if (stage == 0) {
             memcpy(filename, pkt.truedata, pkt.length);
             filename[pkt.length] = 0; // 确保字符串结束
+
+            start_time = GetTickCount();//开始计时
+
             printf("尝试接收文件: %s\n", filename);
             stage = 1;
             expected_seq = pkt.seq_num + pkt.length;
@@ -424,6 +428,16 @@ void connection_loop(SOCKET sock, struct sockaddr_in* cliaddr, int* cliLen, uint
             //在这里就开始滑动窗口接收
             sliding_window_recv(fp, sock, cliaddr, cliLen, ph_recv, filename, &stage, fileSize, client_data_base);
             stage=0;
+
+
+
+            DWORD end_time = GetTickCount();
+            double elapsed_sec = (end_time - start_time) / 1000.0;
+            double throughput = fileSize / elapsed_sec / 1024.0; // KB/s
+            printf("文件 %s 传输成功\n", filename);
+            printf("服务端传输总时间: %.2f 秒\n", elapsed_sec);
+            printf("平均吞吐率: %.2f KB/s\n", throughput);
+
         }
         // ---------- 文件数据 ----------
         else if (stage == 2 && pkt.length > 0) {
