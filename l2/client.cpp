@@ -12,23 +12,30 @@
 
 
 
-
-
 void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,SOCKET sock,sockaddr_in *servaddr,socklen_t servLen){//滑动窗口发送端
-    
     
     SendWindow win;
     memset(&win, 0, sizeof(win));
     win.base = *seq;  // 初始 seq
     win.next_seq = *seq;
     win.count = 0;
-//初始化窗口
+    //初始化窗口
+
+    // ================== [Reno] 新增变量 ==================
+    int cwnd = 1;                 // 拥塞窗口（以包为单位）
+    int ssthresh = WINDOW_SIZE;   // 慢启动阈值
+    uint32_t last_ack = win.base;
+    int dup_ack_cnt = 0;
+    // =====================================================
 
     char buf[512];
     size_t n;
     while((n = fread(buf, 1, sizeof(buf), fp))>0){//只要没发完就一直这么做
 
-        if (win.count < WINDOW_SIZE) {
+        // ================== [Reno] 限制发送窗口 ==================
+        int send_limit = cwnd < WINDOW_SIZE ? cwnd : WINDOW_SIZE;
+        if (win.count < send_limit) {
+        // =========================================================
             SendSlot *slot = &win.slots[win.count];
             slot->pkt.seq_num = win.next_seq;
             slot->pkt.length = (uint16_t)n;
@@ -44,7 +51,6 @@ void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,
             win.count++;
         }
 
-
         //这一部分是滑动窗口固定时的逻辑
         RDT_Packet pkt;//暂存的server返回包
         while(1){
@@ -54,7 +60,6 @@ void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,
             for (int i = 0; i < win.count; i++) {
                 SendSlot *slot = &win.slots[i];
                 if (!slot->acked || slot->acked == -1) {//没被确认
-//printf("???\n");
                     if (GetTickCount() - slot->send_time > 500 || slot->acked == -1) {//超时重传，或第一次传输
                         if(slot->acked==0){
                             //printf("重传包，seq = %d\n", slot->pkt.seq_num);
@@ -62,6 +67,16 @@ void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,
                         else{
                             //printf("第一次传输包，seq = %d\n", slot->pkt.seq_num);
                         }
+
+                        // ================== [Reno] 超时处理 ==================
+                        if (GetTickCount() - slot->send_time > 500) {
+                            ssthresh = cwnd / 2;
+                            if (ssthresh < 1) ssthresh = 1;
+                            cwnd = 1;
+                            dup_ack_cnt = 0;
+                        }
+                        // =====================================================
+
                         slot->acked=0;//标记为传输过但未被确认
 
                         sendto(sock, (char*)&slot->pkt, sizeof(slot->pkt), 0,
@@ -84,23 +99,48 @@ void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,
             int ck=checksum_with_pseudo(&ph_recv,&pkt,pkt.length);
             if(recvl==SOCKET_ERROR || ck!=pkt.checksum){//没收到包或包损坏，休息一小会继续检测即可
                 if (recvl != SOCKET_ERROR) {
-                    //printf("length=%d ", pkt.length);
-                    printf("校验和错误(计算得%d，应为%d)，跳过该包\n", ck, pkt.checksum);//Sleep(1000000);
+                    printf("校验和错误(计算得%d，应为%d)，跳过该包\n", ck, pkt.checksum);
                 }
-                //Sleep(100);
                 continue;
             }
             else{//接收到返回包，更新slot确认情况
+
+                // ================== [Reno] ACK 处理 ==================
+                if (pkt.ack_num == last_ack) {
+                    dup_ack_cnt++;
+                    if (dup_ack_cnt == 3) {
+                        // 快速重传
+                        ssthresh = cwnd / 2;
+                        if (ssthresh < 1) ssthresh = 1;
+                        cwnd = ssthresh + 3;
+
+                        SendSlot *slot = &win.slots[0];
+                        sendto(sock, (char*)&slot->pkt, sizeof(slot->pkt), 0,
+                               (struct sockaddr*)servaddr, servLen);
+                        slot->send_time = GetTickCount();
+                    }
+                }
+                else if (pkt.ack_num > last_ack) {
+                    last_ack = pkt.ack_num;
+                    dup_ack_cnt = 0;
+
+                    if (cwnd < ssthresh) {
+                        cwnd++;          // 慢启动
+                    } else {
+                        cwnd += 1 / cwnd; // 拥塞避免（近似）
+                    }
+                }
+                // =====================================================
+
                 for(int i=0;i<win.count;++i){
                     SendSlot *slot=&win.slots[i];
                     if(slot->pkt.seq_num==pkt.ack_num){
                         slot->acked=1;
-                        //printf("收到确认，seq = %d\n",slot->pkt.seq_num);
                         break;
                     }
-
                 }
             }
+
             if(win.slots[0].acked==1){
                 //如果窗口头被确认，滑动窗口
                 win.base+=win.slots[0].pkt.length;
@@ -108,16 +148,11 @@ void sliding_window_send(int window_size,uint32_t *seq,FILE *fp,PseudoHeader ph,
                     win.slots[i]=win.slots[i+1];
                 }
                 --win.count;
-                
                 break;//出去继续读取下一包准备发送
             }
         }
-
     }
-
-
 }
-
 
 
 
