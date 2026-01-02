@@ -6,7 +6,7 @@
 #include <ws2tcpip.h>
 
 #define MAX_DATA_SIZE 1024
-#define WINDOW_SIZE 5
+#define WINDOW_SIZE 10
 
 #define CLIENT_IP inet_addr("127.0.0.1")
 #define SERVER_IP inet_addr("127.0.0.1")
